@@ -1,0 +1,20 @@
+{
+  "name": "flashc",
+  "version": "0.1.0",
+  "description": "Terminal flashcards for language learning, backed by a Google Sheet, with Anki-style SM-2 scheduling and Thai TTS",
+  "type": "module",
+  "bin": {
+    "flashc": "./flashc.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node flashc.js",
+    "setup": "node flashc.js setup",
+    "sync": "node flashc.js sync",
+    "review": "node flashc.js review",
+    "stats": "node flashc.js stats",
+    "list": "node flashc.js list"
+  }
+}
