@@ -380,6 +380,7 @@ export async function main(argv) {
       case 'list': cmdList(); break;
       case 'scale': cmdScale(argv); break;
       case 'serve': (await import('./server.js')).cmdServe(); break;
+      case 'devices': case 'sync-devices': (await import('./devices.js')).cmdSyncDevices(argv); break;
       case 'help': case '--help': case '-h':
         console.log(`flashc — Google Sheet flashcards with SM-2 scheduling
 
@@ -393,6 +394,7 @@ Commands:
   stats    Progress overview (due counts, retention, ease)
   list     Show all cards with scheduling state
   serve    Run the web UI server (for phone review; FLASHC_PORT env to change port, default 8814)
+  devices  Two-way sync of scheduling progress with a remote host (default henry@nixos)
   help     This message
 
 Keys during review:

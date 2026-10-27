@@ -31,6 +31,21 @@ flashc                  # review session (syncs first)
 | `flashc scale [n]` | Show/set big-text scale (default 1.5 = 50% bigger than your terminal font) |
 | `flashc stats` | Due counts, retention %, average ease |
 | `flashc list` | All cards with scheduling state |
+| `flashc serve` | Run the web UI server (port 8814) for phone review |
+| `flashc devices` | Two-way sync of progress with a remote host (default henry@nixos) |
+
+## Web UI (phone review)
+
+`flashc serve` runs the same scheduler and SQLite DB behind a tiny HTTP server
+on port 8814: a mobile-friendly review page at `http://<host>:8814`, with audio
+played in the browser via a cached Google-TTS proxy (no mpv needed). Run it
+under a systemd user service for always-on use.
+
+Studying on multiple machines: run `flashc devices` before/after sessions — it
+pulls the remote DB, merges card-by-card (higher reps wins the scheduling
+state, tie goes to newer `updated_at`; content edits follow `updated_at`),
+pushes the merged result back, syncs the audio cache, and restarts the remote
+service, so both devices share one history.
 
 ## Keys during review
 

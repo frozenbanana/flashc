@@ -16,6 +16,7 @@
     "review": "node flashc.js review",
     "stats": "node flashc.js stats",
     "list": "node flashc.js list",
-    "serve": "node flashc.js serve"
+    "serve": "node flashc.js serve",
+    "devices": "node flashc.js devices"
   }
 }
