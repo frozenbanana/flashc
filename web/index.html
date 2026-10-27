@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#101014">
+<title>flashc — Thai</title>
+<style>
+  :root {
+    --bg: #101014; --card: #1a1a22; --fg: #e8e8ee; --dim: #8b8b98;
+    --red: #ff5c5c; --yellow: #ffc95c; --green: #5cd65c; --cyan: #5cc8d6;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Noto Sans Thai", "Noto Sans", system-ui, sans-serif;
+    display: flex; flex-direction: column; user-select: none;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header {
+    display: flex; align-items: center; gap: .8rem; padding: .8rem 1rem;
+    font-size: .85rem; color: var(--dim);
+  }
+  header .flag { font-size: 1.1rem; }
+  header .bar { flex: 1; height: 4px; background: #26262e; border-radius: 2px; overflow: hidden; }
+  header .bar div { height: 100%; background: var(--green); width: 0%; transition: width .3s; }
+  main { flex: 1; display: flex; flex-direction: column; align-items: center; padding: 0 1.2rem; overflow-y: auto; }
+  .thai {
+    font-size: clamp(2.6rem, 13vw, 5.2rem); font-weight: 600; line-height: 1.25;
+    text-align: center; margin: auto 0 .5rem; word-break: break-word;
+  }
+  .back { text-align: center; font-size: 1.3rem; margin-bottom: .7rem; min-height: 0; }
+  .back .rom { color: var(--cyan); font-size: 1.05rem; margin-bottom: .25rem; }
+  .back .en { font-size: 1.35rem; }
+  .back .notes { color: var(--dim); font-size: .9rem; margin-top: .5rem; }
+  .status { color: var(--dim); font-size: .8rem; margin-top: auto; padding-bottom: .6rem; text-align: center; }
+  .toolbar { width: 100%; max-width: 26rem; display: flex; justify-content: center; gap: .6rem; margin-bottom: .8rem; }
+  .btn {
+    border: none; border-radius: .8rem; padding: .85rem 1.3rem; font-size: 1rem;
+    background: #262630; color: var(--fg); cursor: pointer; touch-action: manipulation;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn.primary { background: #2f2f3a; font-size: 1.1rem; padding: 1rem 2rem; }
+  .grades { width: 100%; max-width: 26rem; display: grid; grid-template-columns: repeat(4, 1fr); gap: .5rem; margin-bottom: 1rem; padding-bottom: env(safe-area-inset-bottom); }
+  .grades .g { border: none; border-radius: .8rem; padding: .7rem .2rem .5rem; text-align: center; cursor: pointer; touch-action: manipulation; }
+  .grades .g b { display: block; font-size: .95rem; }
+  .grades .g small { color: rgba(0,0,0,.65); font-size: .78rem; }
+  .g.again { background: var(--red); color: #300; }
+  .g.hard  { background: var(--yellow); color: #330; }
+  .g.good  { background: var(--green); color: #032; }
+  .g.easy  { background: var(--cyan); color: #033; }
+  .g:disabled { opacity: .35; }
+  .done { text-align: center; margin: auto 0 2rem; }
+  .done h1 { font-size: 1.6rem; margin-bottom: .3rem; }
+  .done p { color: var(--dim); margin: .2rem 0; }
+  .done .score { font-size: 1.1rem; margin: 1rem 0; }
+  .hidden { display: none !important; }
+  #soundbtn { padding: .5rem 1rem; font-size: .9rem; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="flag">🇹🇭</span>
+    <div class="bar"><div id="progress"></div></div>
+    <span id="remaining"></span>
+  </header>
+
+  <main id="view" hidden>
+    <div class="thai" id="thai"></div>
+    <div class="back hidden" id="back">
+      <div class="rom" id="rom"></div>
+      <div class="en" id="en"></div>
+      <div class="notes" id="notes"></div>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="toolbar">
+      <button class="btn" id="soundbtn" onclick="playAudio()">🔊 Play</button>
+      <button class="btn" id="skipbtn" onclick="skip()">Skip</button>
+    </div>
+    <div class="toolbar"><button class="btn primary hidden" id="revealbtn" onclick="reveal()">Show answer</button></div>
+    <div class="grades hidden" id="grades">
+      <button class="g again" onclick="answer(0)"><b>Again</b><small id="p0"></small></button>
+      <button class="g hard"  onclick="answer(1)"><b>Hard</b><small id="p1"></small></button>
+      <button class="g good"  onclick="answer(2)"><b>Good</b><small id="p2"></small></button>
+      <button class="g easy"  onclick="answer(3)"><b>Easy</b><small id="p3"></small></button>
+    </div>
+  </main>
+
+  <div class="done hidden" id="done">
+    <h1>Session complete 🎉</h1>
+    <div class="score" id="score"></div>
+    <p id="donemsg"></p>
+    <p><button class="btn primary" onclick="start()">Start again</button></p>
+  </div>
+
+  <div class="done" id="boot"><p>Loading…</p></div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  let card = null;
+  let shownAt = 0;
+  const sessionScore = { again: 0, hard: 0, good: 0, easy: 0 };
+  let sessionTotal = null; // cards at session start, for the progress bar
+  const audioEl = new Audio();
+  let showGradesAfterAudio = true;
+
+  function render(data) {
+    if (data.done) {
+      $('view').hidden = true;
+      $('done').classList.remove('hidden');
+      $('boot').classList.add('hidden');
+      const total = sessionScore.again + sessionScore.hard + sessionScore.good + sessionScore.easy;
+      $('score').innerHTML = total
+        ? `<span style="color:var(--red)">${sessionScore.again} again</span> · <span style="color:var(--yellow)">${sessionScore.hard} hard</span> · <span style="color:var(--green)">${sessionScore.good} good</span> · <span style="color:var(--cyan)">${sessionScore.easy} easy</span>`
+        : 'No cards were due.';
+      $('donemsg').textContent = data.message || (data.nextDueIn ? `Next card in ${data.nextDueIn}.` : '');
+      $('progress').style.width = '100%';
+      return;
+    }
+    $('done').classList.add('hidden');
+    $('boot').classList.add('hidden');
+    $('view').hidden = false;
+    card = data.card;
+    shownAt = Date.now();
+    $('thai').textContent = card.thai;
+    $('rom').textContent = card.romanization || '';
+    $('en').textContent = card.english || '';
+    $('notes').textContent = card.notes ? 'note: ' + card.notes : '';
+    $('back').classList.add('hidden');
+    $('grades').classList.add('hidden');
+    $('revealbtn').classList.remove('hidden');
+    $('status').textContent = `${data.due} due · ${card.learning ? 'learning' : card.kind} · ${data.total} total`;
+    $('p0').textContent = card.previews[0]; $('p1').textContent = card.previews[1];
+    $('p2').textContent = card.previews[2]; $('p3').textContent = card.previews[3];
+    if (sessionTotal == null || data.remaining > sessionTotal) sessionTotal = Math.max(sessionTotal ?? 0, data.remaining);
+    $('progress').style.width = `${Math.max(0, Math.round(100 * (1 - data.remaining / sessionTotal)))}%`;
+    $('remaining').textContent = `${data.remaining} left`;
+    playAudio();
+  }
+
+  function reveal() {
+    $('back').classList.remove('hidden');
+    $('revealbtn').classList.add('hidden');
+    $('grades').classList.remove('hidden');
+  }
+  window.reveal = reveal;
+
+  async function post(path, body) {
+    const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+    return res.json();
+  }
+  window.skip = async () => render(await post('/api/skip'));
+
+  async function answer(grade) {
+    document.querySelectorAll('.g').forEach(b => b.disabled = true);
+    sessionScore[['again', 'hard', 'good', 'easy'][grade]]++;
+    const data = await post('/api/answer', { id: card.id, grade });
+    document.querySelectorAll('.g').forEach(b => b.disabled = false);
+    render(data);
+  }
+  window.answer = answer;
+
+  function playAudio() {
+    if (!card) return;
+    audioEl.src = `/api/audio?t=${encodeURIComponent(card.thai)}`;
+    audioEl.play().catch(() => {});
+  }
+  window.playAudio = playAudio;
+
+  async function start() {
+    sessionScore.again = sessionScore.hard = sessionScore.good = sessionScore.easy = 0;
+    sessionTotal = null;
+    const data = await post('/api/reset');
+    render(data);
+  }
+  window.start = start;
+
+  // keyboard support (desktop)
+  document.addEventListener('keydown', (e) => {
+    if (e.key === ' ') { e.preventDefault(); if (!$('grades').classList.contains('hidden') || !$('revealbtn').classList.contains('hidden')) { if (!$('revealbtn').classList.contains('hidden')) reveal(); return; } }
+    if (card && $('grades').classList.contains('hidden') && (e.key === ' ' || e.key === 'Enter')) { reveal(); return; }
+    const map = { '1': 0, '2': 1, '3': 2, '4': 3 };
+    if (e.key in map && !$('grades').classList.contains('hidden')) answer(map[e.key]);
+    if (e.key === 'p') playAudio();
+    if (e.key === 's') skip();
+  });
+
+  // tap the Thai word to reveal too
+  $('thai').addEventListener('click', () => { if (!$('revealbtn').classList.contains('hidden')) reveal(); });
+
+  start();
+</script>
+</body>
+</html>

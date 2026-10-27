@@ -379,6 +379,7 @@ export async function main(argv) {
       case 'stats': cmdStats(); break;
       case 'list': cmdList(); break;
       case 'scale': cmdScale(argv); break;
+      case 'serve': (await import('./server.js')).cmdServe(); break;
       case 'help': case '--help': case '-h':
         console.log(`flashc — Google Sheet flashcards with SM-2 scheduling
 
@@ -391,6 +392,7 @@ Commands:
   scale    Show/set the big-text scale (default 1.5 = 50% bigger)
   stats    Progress overview (due counts, retention, ease)
   list     Show all cards with scheduling state
+  serve    Run the web UI server (for phone review; FLASHC_PORT env to change port, default 8814)
   help     This message
 
 Keys during review:

@@ -15,6 +15,7 @@
     "sync": "node flashc.js sync",
     "review": "node flashc.js review",
     "stats": "node flashc.js stats",
-    "list": "node flashc.js list"
+    "list": "node flashc.js list",
+    "serve": "node flashc.js serve"
   }
 }
