@@ -1,8 +1,9 @@
 import { spawnSync } from 'node:child_process';
 
 // Big-text rendering: renders text with Pango (proper Thai shaping) via ImageMagick
-// and prints it inline as a sixel image. Auto-detects sixel support, cell size and
-// foreground color from the terminal.
+// and prints it inline as a sixel image (if the terminal supports it) or as
+// Unicode half-block art (works everywhere). Auto-detects sixel support, cell
+// size and foreground color from the terminal.
 
 const cache = new Map();
 
@@ -70,12 +71,18 @@ function escapeXml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function hexToRgb888(hex) {
+  const h = hex.replace('#', '');
+  const v = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
+  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
+}
+
 /**
  * Render `text` as a sixel image with a glyph height of ~pxHeight screen pixels.
  * Returns a Buffer (the sixel escape sequence) or null on failure.
  */
 export function renderBigText(text, pxHeight, color = '#ffffff') {
-  const key = `${text}\u0000${pxHeight}\u0000${color}`;
+  const key = `sixel\u0000${text}\u0000${pxHeight}\u0000${color}`;
   if (cache.has(key)) return cache.get(key);
 
   // px -> pt at 96dpi (Pango font sizes are in points)
@@ -98,9 +105,39 @@ export function renderBigText(text, pxHeight, color = '#ffffff') {
   return out;
 }
 
+/** Rasterize `text` at `pts` points, wrapping at `maxW` px. Returns { px, W, H } or null. */
+function rasterize(text, pts, maxW = null) {
+  const markup = `<span font_desc="Noto Sans Thai ${pts}" foreground="#ffffff">${escapeXml(text)}</span>`;
+  const args = ['-background', 'none'];
+  if (maxW) args.push('-size', `${maxW}x`); // pango wraps to this width
+  args.push(`pango:${markup}`, '-depth', '8', 'txt:-');
+  const r = spawnSync('magick', args, { maxBuffer: 32 * 1024 * 1024, timeout: 5000 });
+  if (r.status !== 0 || !r.stdout) return null;
+  const lines = r.stdout.toString('utf8').split('\n');
+  // header: # ImageMagick pixel enumeration: W,H,depth,max,colorspace
+  const hdr = lines[0].match(/pixel enumeration: (\d+),(\d+),(\d+),(\d+)/);
+  const maxVal = hdr ? +hdr[4] : 255;
+  const px = new Map();
+  let W = 0, H = 0;
+  for (const line of lines) {
+    const m = line.match(/^(\d+),(\d+): \(([\d,.]+)\)/);
+    if (!m) continue;
+    const x = +m[1], y = +m[2];
+    const parts = m[3].split(',');
+    const alpha = parts.length >= 4 ? parseFloat(parts[3]) : maxVal; // srgba: 4th channel = alpha
+    if (alpha < maxVal / 2) continue; // coverage threshold
+    px.set(`${x},${y}`, 1);
+    if (x + 1 > W) W = x + 1;
+    if (y + 1 > H) H = y + 1;
+  }
+  return W > 0 && H > 0 ? { px, W, H } : null;
+}
+
 /**
- * Render `text` as Unicode half-block art (▀▄█) occupying `rows` terminal rows.
- * Works in any terminal (no sixel needed). Returns a string or null.
+ * Render `text` as Unicode half-block art (▀▄█), ~`rows` terminal rows tall.
+ * Works in any terminal (no sixel needed). Wide or long text is scaled down to
+ * fit the terminal, so every card renders at a consistent size. Returns a
+ * string, or null if it can't be made legible (caller falls back to plain text).
  */
 export function renderBlockText(text, rows, color = '#ffffff') {
   rows = Math.max(4, Math.round(rows)); // below ~4 rows, block art is illegible
@@ -108,61 +145,38 @@ export function renderBlockText(text, rows, color = '#ffffff') {
   if (cache.has(key)) return cache.get(key);
 
   const cols = process.stdout.columns || 80;
+  const termRows = process.stdout.rows || 24;
+  const maxW = Math.max(20, cols - 4);
+  const maxH = Math.max(8, (termRows - 8) * 2); // px; leave room for UI lines
   // em height ≈ rows*2 px (each block row = 2 pixel rows)
   const pts = Math.max(2, Math.round(rows * 2 * 0.75));
-  const markup = `<span font_desc="Noto Sans Thai ${pts}" foreground="#ffffff">${escapeXml(text)}</span>`;
 
   let out = null;
   try {
-    const r = spawnSync('magick', [
-      '-background', 'none',
-      `pango:${markup}`,
-      '-depth', '8',
-      'txt:-',
-    ], { maxBuffer: 32 * 1024 * 1024, timeout: 5000 });
-
-    if (r.status === 0 && r.stdout) {
-      const lines = r.stdout.toString('utf8').split('\n');
-      // header: # ImageMagick pixel enumeration: W,H,depth,max, colorspace
-      const hdr = lines[0].match(/pixel enumeration: (\d+),(\d+),(\d+),(\d+)/);
-      const maxVal = hdr ? +hdr[4] : 255;
-      const px = new Map();
-      let W = 0, H = 0;
-      for (const line of lines) {
-        const m = line.match(/^(\d+),(\d+): \(([\d,.]+)\)/);
-        if (!m) continue;
-        const x = +m[1], y = +m[2];
-        const parts = m[3].split(',');
-        const alpha = parts.length >= 4 ? parseFloat(parts[3]) : maxVal; // srgba: 4th channel = alpha
-        if (alpha < maxVal / 2) continue; // coverage threshold
-        px.set(`${x},${y}`, 1);
-        if (x + 1 > W) W = x + 1;
-        if (y + 1 > H) H = y + 1;
-      }
-      // too wide for the terminal -> caller falls back to plain text
-      if (W > 0 && W <= cols - 4) {
-        const blockRows = Math.ceil(H / 2);
-        const [rr, gg, bb] = hexToRgb888(color);
-        let art = `\x1b[38;2;${rr};${gg};${bb}m`;
-        for (let y = 0; y < blockRows * 2; y += 2) {
-          for (let x = 0; x < W; x++) {
-            const top = px.has(`${x},${y}`);
-            const bot = px.has(`${x},${y + 1}`);
-            art += (top && bot) ? '█' : top ? '▀' : bot ? '▄' : ' ';
-          }
-          art += '\n';
+    // fixed font size for every card; long phrases wrap to more lines
+    // (consistent size), and only shrink if the wrapped art is too tall
+    let img = rasterize(text, pts, maxW);
+    if (img && img.H > maxH) {
+      const pts2 = Math.max(3, Math.floor(pts * (maxH / img.H)));
+      if (pts2 < pts) img = rasterize(text, pts2, maxW) || img;
+    }
+    if (img) {
+      const { px, W, H } = img;
+      const blockRows = Math.ceil(H / 2);
+      const [rr, gg, bb] = hexToRgb888(color);
+      let art = `\x1b[38;2;${rr};${gg};${bb}m`;
+      for (let y = 0; y < blockRows * 2; y += 2) {
+        for (let x = 0; x < W; x++) {
+          const top = px.has(`${x},${y}`);
+          const bot = px.has(`${x},${y + 1}`);
+          art += (top && bot) ? '█' : top ? '▀' : bot ? '▄' : ' ';
         }
-        art += '\x1b[0m';
-        out = art;
+        art += '\n';
       }
+      art += '\x1b[0m';
+      out = art;
     }
   } catch { /* fall through */ }
   cache.set(key, out);
   return out;
-}
-
-function hexToRgb888(hex) {
-  const h = hex.replace('#', '');
-  const v = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
-  return [(v >> 16) & 255, (v >> 8) & 255, v & 255];
 }
