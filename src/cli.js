@@ -229,7 +229,9 @@ async function cmdReview(argv) {
   }
 
   // session budgets — tuned for a focused 5-20 minute session
-  const minutes = argv.includes('--minutes') ? parseInt(argv[argv.indexOf('--minutes') + 1], 10) : null;
+  const minutes = argv.includes('--minutes')
+    ? parseInt(argv[argv.indexOf('--minutes') + 1], 10)
+    : (parseInt(process.env.FLASHC_MINUTES, 10) || null);
   const newLimit = parseInt(getConfig('new_per_session'), 10) || 5;
   const maxCards = parseInt(getConfig('session_cards'), 10) || 20;
   const endTime = minutes ? Date.now() + minutes * 60_000 : null;
@@ -446,7 +448,15 @@ function cmdConfig(argv) {
 
 // ---------- main ----------
 
-export async function main(argv) {
+export async function main(rawArgv) {
+  // allow --minutes anywhere: 'flashc --minutes 10' or 'flashc review --minutes 10'
+  let minutes = null;
+  const argv = [];
+  for (let i = 0; i < rawArgv.length; i++) {
+    if (rawArgv[i] === '--minutes') { minutes = rawArgv[++i]; continue; }
+    argv.push(rawArgv[i]);
+  }
+  if (minutes) process.env.FLASHC_MINUTES = minutes;
   const cmd = argv[0] || 'review';
   try {
     switch (cmd) {
