@@ -175,19 +175,14 @@ async function cmdSync() {
 const term = { sixel: false, cellH: 22, color: '#ffffff' };
 let bigScale = 1.5;
 
-function getQueue() {
-  const now = Date.now();
-  // due learning cards + due review cards, learning first
-  return db.prepare(`
-    SELECT * FROM cards WHERE active = 1 AND due <= ?
-    ORDER BY CASE WHEN step >= 0 THEN 0 ELSE 1 END, due ASC
-  `).all(now);
-}
-
-function printCardFront(card, index, total) {
+function printCardFront(card, sess) {
   clearScreen();
-  const due = db.prepare('SELECT COUNT(*) c FROM cards WHERE active = 1 AND due <= ?').get(Date.now()).c;
-  console.log(DIM(`card ${index + 1}/${total} · ${due} due · ${card.english ? 'en→th' : 'th→en'}`));
+  const now = Date.now();
+  const learnDue = db.prepare('SELECT COUNT(*) c FROM cards WHERE active = 1 AND step >= 0 AND reps > 0 AND due <= ?').get(now).c;
+  const revDue = db.prepare('SELECT COUNT(*) c FROM cards WHERE active = 1 AND step = -1 AND due <= ?').get(now).c;
+  const newLeft = db.prepare('SELECT COUNT(*) c FROM cards WHERE active = 1 AND reps = 0').get().c;
+  const budgetLeft = sess.max - sess.answered;
+  console.log(DIM(`${card.english ? 'en→th' : 'th→en'} · answered ${sess.answered}/${sess.max} · this session: ${budgetLeft} left · due later: ${learnDue + revDue} · new unseen: ${newLeft}`));
   console.log('');
   const bigRows = Math.max(2, Math.round(bigScale * 1.5));
   const big = term.sixel
@@ -201,6 +196,14 @@ function printCardFront(card, index, total) {
     console.log('');
   }
   console.log(DIM('  [p] play audio   [space] reveal   [s] skip   [q] quit'));
+}
+
+function nextDueInfo() {
+  const now = Date.now();
+  const learn = db.prepare('SELECT MIN(due) m FROM cards WHERE active = 1 AND step >= 0 AND reps > 0 AND due > ?').get(now).m;
+  const rev = db.prepare('SELECT MIN(due) m FROM cards WHERE active = 1 AND step = -1 AND due > ?').get(now).m;
+  const times = [learn, rev].filter(Boolean);
+  return times.length ? Math.min(...times) : null;
 }
 
 function printCardBack(card, previews) {
@@ -219,11 +222,17 @@ function gradeCard(card, grade) {
     .run(state.due, state.interval, state.ease, state.step, state.lapses, Date.now(), card.id);
 }
 
-async function cmdReview() {
+async function cmdReview(argv) {
   if (!getConfig('sheet_id') || !getMapping()) {
     console.log('Not configured yet. Run ' + BOLD('flashc setup') + ' first.');
     process.exit(1);
   }
+
+  // session budgets — tuned for a focused 5-20 minute session
+  const minutes = argv.includes('--minutes') ? parseInt(argv[argv.indexOf('--minutes') + 1], 10) : null;
+  const newLimit = parseInt(getConfig('new_per_session'), 10) || 5;
+  const maxCards = parseInt(getConfig('session_cards'), 10) || 20;
+  const endTime = minutes ? Date.now() + minutes * 60_000 : null;
 
   // sync on startup (registers new words from the sheet)
   try {
@@ -232,65 +241,109 @@ async function cmdReview() {
     console.log(YELLOW(`Warning: sync failed (${e.message}) — reviewing with local data.`));
   }
 
-  const newLimit = 20; // new cards introduced per session
   // probe terminal capabilities once (sixel support, cell size, fg color)
   bigScale = parseFloat(getConfig('big_scale')) || 1.5;
   const detected = await detectTerminal();
   term.sixel = detected.sixel;
   term.cellH = detected.cellH;
   term.color = detected.color;
-  const newIds = db.prepare('SELECT id FROM cards WHERE active = 1 AND due <= ? AND reps = 0 ORDER BY sheet_row LIMIT ?')
-    .all(Date.now(), newLimit).map(r => r.id);
-  const newSet = new Set(newIds);
-  let queue = getQueue().filter(c => !isNew(c) || newSet.has(c.id));
-  if (!queue.length) {
-    const next = db.prepare('SELECT MIN(due) m FROM cards WHERE active = 1 AND due > ?').get(Date.now()).m;
-    console.log(GREEN('Nothing due! 🎉') + (next ? `  Next card in ${fmtDue(next)}.` : ''));
-    return;
-  }
 
-  console.log(`Starting review: ${queue.length} cards. ${DIM('(synced from sheet on startup)')}`);
+  const skipped = new Set();
+  let answered = { again: 0, hard: 0, good: 0, easy: 0 };
+  let answeredTotal = 0;
+  let newIntroduced = 0;
+  let curCard = null;
+  let revealed = false;
+  let waiting = null; // active countdown timer
+  let answersSinceNew = 0;
+
+  const sess = () => ({ answered: answeredTotal, max: maxCards });
+  const budgetLeft = () => answeredTotal < maxCards && (!endTime || Date.now() < endTime);
+
+  /** Priority: cards you're actively learning > (a new card every 5th answer) > due reviews > new cards. */
+  const pickNext = () => {
+    const now = Date.now();
+    const notSkipped = (rows) => rows.filter(c => !skipped.has(c.id));
+    const learn = notSkipped(db.prepare('SELECT * FROM cards WHERE active = 1 AND step >= 0 AND reps > 0 AND due <= ? ORDER BY due LIMIT 25').all(now));
+    if (learn.length) return learn[0];
+    if (newIntroduced < newLimit && answersSinceNew >= 4) {
+      const n = notSkipped(db.prepare('SELECT * FROM cards WHERE active = 1 AND reps = 0 ORDER BY sheet_row LIMIT 25').all())[0];
+      if (n) { newIntroduced++; answersSinceNew = 0; return n; }
+    }
+    const rev = notSkipped(db.prepare('SELECT * FROM cards WHERE active = 1 AND step = -1 AND due <= ? ORDER BY due LIMIT 25').all(now));
+    if (rev.length) return rev[0];
+    if (newIntroduced < newLimit) {
+      const n = notSkipped(db.prepare('SELECT * FROM cards WHERE active = 1 AND reps = 0 ORDER BY sheet_row LIMIT 25').all())[0];
+      if (n) { newIntroduced++; answersSinceNew = 0; return n; }
+    }
+    return null;
+  };
+
+  console.log(`Session: up to ${maxCards} cards, ${newLimit} new.${minutes ? ` Time budget: ${minutes} min.` : ''} ${DIM('(synced from sheet on startup)')}`);
 
   readline.emitKeypressEvents(process.stdin);
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
 
-  let i = 0;
-  let revealed = false;
-  let answered = { again: 0, hard: 0, good: 0, easy: 0 };
-
-  const current = () => queue[i];
-
   const finish = () => {
+    if (waiting) clearTimeout(waiting);
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
     clearScreen();
     const total = answered.again + answered.hard + answered.good + answered.easy;
     if (total > 0) {
       console.log(BOLD('Session complete 🎉'));
       console.log(`  ${total} answers: ${RED(answered.again + ' again')} · ${YELLOW(answered.hard + ' hard')} · ${GREEN(answered.good + ' good')} · ${CYAN(answered.easy + ' easy')}`);
+      console.log(`  new cards introduced: ${newIntroduced}`);
+      const now = Date.now();
+      const learnDue = db.prepare('SELECT COUNT(*) c FROM cards WHERE active = 1 AND step >= 0 AND reps > 0 AND due <= ?').get(now).c;
+      const revDue = db.prepare('SELECT COUNT(*) c FROM cards WHERE active = 1 AND step = -1 AND due <= ?').get(now).c;
+      const remaining = learnDue + revDue;
+      if (remaining > 0) {
+        console.log(YELLOW(`  ${remaining} cards still due — run ${BOLD('flashc')} again whenever you have another few minutes.`));
+      } else {
+        const nd = nextDueInfo();
+        console.log(GREEN(`  Nothing more due right now!`) + (nd ? `  Next in ${fmtDue(nd)}.` : ''));
+      }
     } else {
       console.log('Session ended.');
     }
     process.exit(0);
   };
 
-  const render = () => {
-    const card = current();
-    printCardFront(card, i, queue.length);
+  const showCard = (card) => {
+    curCard = card;
     revealed = false;
+    printCardFront(card, sess());
     prefetch(card.thai);
     play(card.thai).catch(() => {}); // auto-play on show
   };
 
+  // Decide what to show next: a card, a countdown wait, or the finish screen.
+  const step = () => {
+    const next = pickNext();
+    if (next) { showCard(next); return; }
+    if (!budgetLeft()) { finish(); return; }
+    // nothing due yet — wait for the next learning card if it's close
+    const nd = nextDueInfo();
+    if (nd && nd - Date.now() <= 3 * 60_000) {
+      const secs = Math.max(1, Math.ceil((nd - Date.now()) / 1000));
+      clearScreen();
+      console.log(DIM(`next card in ${secs}s — ${BOLD('q')} to stop for now`));
+      waiting = setTimeout(step, (secs * 1000) + 250);
+      return;
+    }
+    finish();
+  };
+
   process.stdin.on('keypress', (str, key) => {
     if (key.ctrl && key.name === 'c') { finish(); return; }
-    const card = current();
-    if (!card) { finish(); return; }
-
     if (key.name === 'q') { finish(); return; }
+    if (!curCard) return; // still waiting for next card
+    const card = curCard;
+
     if (key.name === 'p') { play(card.thai); return; }
-    if (key.name === 's') { // skip: push to back
-      queue.push(queue.splice(i, 1)[0]);
-      render();
+    if (key.name === 's') { // skip for this session
+      skipped.add(card.id);
+      step();
       return;
     }
     if (!revealed) {
@@ -306,13 +359,14 @@ async function cmdReview() {
       const grade = grades[str];
       gradeCard(card, grade);
       answered[['again', 'hard', 'good', 'easy'][grade]]++;
-      i++;
-      if (i >= queue.length) finish();
-      else render();
+      answeredTotal++;
+      answersSinceNew++;
+      if (!budgetLeft()) { finish(); return; }
+      step();
     }
   });
 
-  render();
+  step();
 }
 
 // ---------- stats ----------
@@ -367,6 +421,29 @@ function cmdScale(argv) {
   console.log(GREEN(`Big-text scale set to ${val}×.`));
 }
 
+// ---------- config ----------
+
+const CONFIG_KEYS = ['new_per_session', 'session_cards', 'big_scale'];
+const CONFIG_HELP = {
+  new_per_session: 'new cards introduced per session (default 5)',
+  session_cards: 'max cards answered per session (default 20)',
+  big_scale: 'big-text size multiplier (default 1.5)',
+};
+
+function cmdConfig(argv) {
+  const [key, value] = argv.slice(1);
+  if (!key) {
+    console.log(BOLD('flashc settings:'));
+    for (const k of CONFIG_KEYS) console.log(`  ${k}: ${getConfig(k) || '(default)'}  ${DIM(CONFIG_HELP[k])}`);
+    console.log(`\nChange one: ${BOLD('flashc config <key> <value>')}  e.g. ${BOLD('flashc config new_per_session 3')}`);
+    return;
+  }
+  if (!CONFIG_KEYS.includes(key)) { console.error(`Unknown setting: ${key}`); process.exit(1); }
+  if (value === undefined) { console.log(`${key} = ${getConfig(key) || '(default)'}`); return; }
+  setConfig(key, value);
+  console.log(GREEN(`${key} set to ${value}.`));
+}
+
 // ---------- main ----------
 
 export async function main(argv) {
@@ -375,10 +452,11 @@ export async function main(argv) {
     switch (cmd) {
       case 'setup': await cmdSetup(); break;
       case 'sync': await cmdSync(); break;
-      case 'review': await cmdReview(); break;
+      case 'review': await cmdReview(argv); break;
       case 'stats': cmdStats(); break;
       case 'list': cmdList(); break;
       case 'scale': cmdScale(argv); break;
+      case 'config': cmdConfig(argv); break;
       case 'serve': (await import('./server.js')).cmdServe(); break;
       case 'devices': case 'sync-devices': (await import('./devices.js')).cmdSyncDevices(argv); break;
       case 'help': case '--help': case '-h':
@@ -391,6 +469,7 @@ Commands:
   sync     Fetch the sheet: register new words, update changed ones
   review   Review session (default). Syncs first, then shows due cards.
   scale    Show/set the big-text scale (default 1.5 = 50% bigger)
+  config   Show/change settings (new_per_session, session_cards, big_scale)
   stats    Progress overview (due counts, retention, ease)
   list     Show all cards with scheduling state
   serve    Run the web UI server (for phone review; FLASHC_PORT env to change port, default 8814)

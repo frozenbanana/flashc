@@ -29,6 +29,7 @@ flashc                  # review session (syncs first)
 | `flashc sync` | Manually sync the sheet |
 | `flashc` / `flashc review` | Review session — syncs automatically, then shows due cards |
 | `flashc scale [n]` | Show/set big-text scale (default 1.5 = 50% bigger than your terminal font) |
+| `flashc config [key value]` | Show/change session settings (new per session, session size, big-text scale) |
 | `flashc stats` | Due counts, retention %, average ease |
 | `flashc list` | All cards with scheduling state |
 | `flashc serve` | Run the web UI server (port 8814) for phone review |
@@ -57,11 +58,23 @@ service, so both devices share one history.
 | `s` | Skip card (pushes to back of queue) |
 | `q` / `ctrl+c` | Quit |
 
+## Focused sessions (built for 5–20 minutes)
+
+A session is bounded, not endless: by default **max 20 answers** and **5 new cards** — tune with `flashc config` (`new_per_session`, `session_cards`) or add a time budget with `flashc --minutes 10`.
+
+Within a session the card picker is dynamic:
+
+1. Cards you're actively **learning** (due Again/step intervals — the words you struggle with dominate the session)
+2. A **new card** after every 4 review answers (so you genuinely learn a few new words, even with a backlog)
+3. Due **reviews**
+
+If the next learning card is due within 3 minutes, the session waits with a countdown instead of dropping it. At the end you get a summary plus what's still due for later.
+
 ## Scheduling (SM-2, Anki-style)
 
 - **New cards** go through learning steps: **1 min → 10 min**, then graduate at **1 day** (Easy graduates immediately at 4 days).
 - **Again** on a review card resets it to relearning and lowers its ease factor; **Easy** raises it.
-- Max 20 new cards introduced per session; due learning/review cards always shown.
+- Max 20 answers and 5 new cards per session (see `flashc config`); Again/learning-step cards re-appear within the same session.
 - `stats` shows retention (1 − lapses/reviews) and average ease so you can see how well you're learning.
 
 ## Suggested sheet layout
